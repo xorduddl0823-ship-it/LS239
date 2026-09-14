@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LS239 측정값 수신기</title>
+<style>
+  :root{
+    --shell:#1b2430;
+    --shell-deep:#121923;
+    --lcd:#a8d5c4;
+    --lcd-ink:#16241d;
+    --edge:#2e3d4e;
+    --ink:#dce5ee;
+    --ink-dim:#7e91a6;
+    --live:#5ad1a0;
+    --warn:#e0a04a;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    padding:16px 14px 40px;
+    background:var(--shell-deep);
+    color:var(--ink);
+    font-family:"Helvetica Neue",-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-text-size-adjust:100%;
+  }
+  h1{
+    font-size:15px;
+    font-weight:600;
+    letter-spacing:.02em;
+    margin:0 0 14px;
+    color:var(--ink-dim);
+  }
+
+  .panel{
+    background:var(--lcd);
+    border-radius:10px;
+    padding:18px 18px 12px;
+    color:var(--lcd-ink);
+    box-shadow:inset 0 2px 6px rgba(0,0,0,.25);
+  }
+  .reading{
+    display:flex;
+    align-items:baseline;
+    justify-content:flex-end;
+    gap:8px;
+    font-variant-numeric:tabular-nums;
+  }
+  .reading b{
+    font-size:76px;
+    font-weight:700;
+    line-height:.9;
+    letter-spacing:-.02em;
+  }
+  .reading span{font-size:20px;font-weight:600}
+  .meta{
+    display:flex;
+    justify-content:space-between;
+    margin-top:12px;
+    padding-top:8px;
+    border-top:1px solid rgba(22,36,29,.35);
+    font-size:13px;
+    font-weight:600;
+  }
+
+  .bar{display:flex;gap:8px;margin:14px 0}
+  button{
+    flex:1;
+    font:inherit;
+    font-weight:600;
+    font-size:15px;
+    padding:14px;
+    border-radius:8px;
+    border:1px solid var(--edge);
+    background:var(--shell);
+    color:var(--ink);
+    cursor:pointer;
+  }
+  button:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+  button:disabled{opacity:.4;cursor:default}
+  button.primary{background:var(--live);border-color:var(--live);color:#08221a}
+
+  .status{
+    font-size:13px;
+    color:var(--ink-dim);
+    margin:0 0 14px;
+    min-height:1.4em;
+  }
+  .status.on{color:var(--live)}
+  .status.err{color:var(--warn)}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{
+    text-align:left;
+    font-weight:600;
+    color:var(--ink-dim);
+    padding:8px 6px;
+    border-bottom:1px solid var(--edge);
+    font-size:12px;
+  }
+  td{
+    padding:9px 6px;
+    border-bottom:1px solid rgba(46,61,78,.5);
+    vertical-align:top;
+  }
+  td.num{font-variant-numeric:tabular-nums;font-weight:700;font-size:15px;white-space:nowrap}
+  td.hex{
+    font-family:"SF Mono",Menlo,Consolas,monospace;
+    font-size:10.5px;
+    color:var(--ink-dim);
+    word-break:break-all;
+    line-height:1.5;
+  }
+  .empty{
+    padding:28px 6px;
+    color:var(--ink-dim);
+    font-size:13px;
+    text-align:center;
+  }
+  .note{
+    margin-top:22px;
+    padding-top:14px;
+    border-top:1px solid var(--edge);
+    font-size:12px;
+    line-height:1.7;
+    color:var(--ink-dim);
+  }
+  code{font-family:"SF Mono",Menlo,Consolas,monospace;color:var(--ink)}
+</style>
+</head>
+<body>
+
+<h1>LS239 측정값 수신기</h1>
+
+<div class="panel">
+  <div class="reading"><b id="val">---</b><span>㎛</span></div>
+  <div class="meta">
+    <span id="mat">대기</span>
+    <span id="count">0건</span>
+  </div>
+</div>
+
+<div class="bar">
+  <button id="connect" class="primary">측정기 연결</button>
+  <button id="csv" disabled>CSV 저장</button>
+</div>
+<p class="status" id="status">연결 버튼을 누르고 목록에서 CT로 시작하는 기기를 선택하세요.</p>
+
+<table>
+  <thead><tr><th>시각</th><th>값</th><th>재질</th><th>원본 패킷</th></tr></thead>
+  <tbody id="rows"><tr><td colspan="4" class="empty">측정을 시작하면 여기에 쌓입니다</td></tr></tbody>
+</table>
+
+<p class="note">
+측정 패킷은 <code>AB 44</code>로 시작하는 15바이트입니다.
+9~10번째 바이트를 리틀엔디안 16비트로 읽어 10으로 나눈 값이 두께이고(기기는 소수점을 버림),
+13번째 바이트가 재질 코드(1=Fe, 2=Al, 3=FeZn)입니다.
+기기 화면이 <code>Non-Metal</code>일 때는 패킷을 보내지 않습니다.
+</p>
+
+<script>
+// 서비스 FFE0 안에서 측정값 채널 FFE1 하나만 쓴다.
+// 구독한 뒤 같은 채널에 세션 유지 패킷을 주기적으로 써 주어야 기기가 측정값을 보낸다.
+const SERVICE = 0xFFE0, CHAR = 0xFFE1;
+const KEEPALIVE = new Uint8Array([0xAB,0x21,0x09,0x00,0x01,0x00,0x01,0x4B,0x7A]);
+const KEEPALIVE_MS = 30000;
+
+const MAT = {1:'Fe', 2:'Al', 3:'FeZn'};
+const rows = [];
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+let linked = false, timer = null;
+
+function setStatus(msg, cls){
+  $('status').textContent = msg;
+  $('status').className = 'status' + (cls ? ' ' + cls : '');
+}
+
+function hex(bytes){
+  return [...bytes].map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+}
+
+function render(){
+  const tb = $('rows');
+  if (!rows.length){
+    tb.innerHTML = '<tr><td colspan="4" class="empty">측정을 시작하면 여기에 쌓입니다</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(r => `<tr>
+    <td>${r.time}</td>
+    <td class="num">${r.um === null ? '—' : r.um}</td>
+    <td>${r.mat}</td>
+    <td class="hex">${r.raw}</td>
+  </tr>`).join('');
+}
+
+function onPacket(e){
+  const dv = e.target.value;
+  const bytes = new Uint8Array(dv.buffer);
+  const time = new Date().toLocaleTimeString('ko-KR', {hour12:false});
+
+  // 측정 패킷만 기록한다. 세션 응답 등 다른 패킷은 건너뛴다.
+  if (bytes.length < 15 || bytes[0] !== 0xAB || bytes[1] !== 0x44) return;
+
+  const um = Math.floor(dv.getUint16(8, true) / 10);
+  const mat = MAT[bytes[12]] || ('코드 ' + bytes[12]);
+
+  $('val').textContent = um;
+  $('mat').textContent = mat;
+  rows.unshift({time, um, mat, raw: hex(bytes)});
+
+  $('count').textContent = rows.length + '건';
+  $('csv').disabled = false;
+  render();
+}
+
+async function hook(dev){
+  const server = await dev.gatt.connect();
+  await sleep(1200);
+  const svc = await server.getPrimaryService(SERVICE);
+  const ch = await svc.getCharacteristic(CHAR);
+
+  await ch.startNotifications();
+  ch.addEventListener('characteristicvaluechanged', onPacket);
+
+  await ch.writeValueWithoutResponse(KEEPALIVE);
+  clearInterval(timer);
+  timer = setInterval(() => {
+    if (!linked) return;
+    ch.writeValueWithoutResponse(KEEPALIVE).catch(() => {});
+  }, KEEPALIVE_MS);
+}
+
+$('connect').onclick = async () => {
+  if (!navigator.bluetooth){
+    setStatus('이 브라우저는 웹 블루투스를 지원하지 않습니다. 안드로이드 크롬에서 열어주세요.', 'err');
+    return;
+  }
+
+  let dev;
+  try {
+    setStatus('기기를 찾는 중…');
+    dev = await navigator.bluetooth.requestDevice({
+      filters: [{services:[SERVICE]}],
+      optionalServices: [SERVICE]
+    });
+  } catch (err){
+    setStatus('기기를 선택하지 않았습니다.', 'err');
+    return;
+  }
+
+  dev.addEventListener('gattserverdisconnected', () => {
+    if (!linked) return;
+    linked = false;
+    clearInterval(timer);
+    setStatus('연결이 끊겼습니다. 다시 연결하세요.', 'err');
+    $('connect').disabled = false;
+  });
+
+  for (let attempt = 1; attempt <= 5; attempt++){
+    try {
+      setStatus('연결 중… (' + attempt + '/5)');
+      await hook(dev);
+      linked = true;
+      $('connect').disabled = true;
+      setStatus(dev.name + ' 연결됨. 이제 측정하세요.', 'on');
+      return;
+    } catch (err){
+      if (dev.gatt.connected) dev.gatt.disconnect();
+      if (attempt === 5){
+        setStatus('연결 실패: ' + err.message + ' — 폰을 재부팅한 뒤 다시 시도하세요.', 'err');
+      } else {
+        await sleep(1200);
+      }
+    }
+  }
+};
+
+$('csv').onclick = () => {
+  const lines = ['시각,두께(um),재질,원본패킷'];
+  [...rows].reverse().forEach(r => {
+    lines.push([r.time, r.um, r.mat, '"' + r.raw + '"'].join(','));
+  });
+  const blob = new Blob(['\ufeff' + lines.join('\n')], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ls239-' + Date.now() + '.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+</script>
+</body>
+</html>
