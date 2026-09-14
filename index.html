@@ -222,33 +222,58 @@ function onPacket(e){
   render();
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function hook(dev, attempt){
+  // 직전 연결이 남아 있으면 정리
+  if (dev.gatt.connected) dev.gatt.disconnect();
+  await sleep(300 * attempt);
+
+  const server = await dev.gatt.connect();
+  await sleep(500);                     // 서비스 탐색 전 안정화 대기
+  const svc = await server.getPrimaryService(SERVICE);
+  const ch = await svc.getCharacteristic(CHAR);
+  await ch.startNotifications();
+  ch.addEventListener('characteristicvaluechanged', onPacket);
+}
+
 $('connect').onclick = async () => {
   if (!navigator.bluetooth){
     setStatus('이 브라우저는 웹 블루투스를 지원하지 않습니다. 안드로이드 크롬에서 열어주세요.', 'err');
     return;
   }
+
+  let dev;
   try {
     setStatus('기기를 찾는 중…');
-    const dev = await navigator.bluetooth.requestDevice({
+    dev = await navigator.bluetooth.requestDevice({
       filters: [{services:[SERVICE]}],
       optionalServices: [SERVICE]
     });
-    dev.addEventListener('gattserverdisconnected', () => {
-      setStatus('연결이 끊겼습니다. 다시 연결하세요.', 'err');
-      $('connect').disabled = false;
-    });
-
-    setStatus('연결 중…');
-    const server = await dev.gatt.connect();
-    const svc = await server.getPrimaryService(SERVICE);
-    const ch = await svc.getCharacteristic(CHAR);
-    await ch.startNotifications();
-    ch.addEventListener('characteristicvaluechanged', onPacket);
-
-    $('connect').disabled = true;
-    setStatus(dev.name + ' 연결됨. 이제 측정하세요.', 'on');
   } catch (err){
-    setStatus('연결 실패: ' + err.message, 'err');
+    setStatus('기기를 선택하지 않았습니다.', 'err');
+    return;
+  }
+
+  dev.addEventListener('gattserverdisconnected', () => {
+    setStatus('연결이 끊겼습니다. 다시 연결하세요.', 'err');
+    $('connect').disabled = false;
+  });
+
+  for (let attempt = 1; attempt <= 4; attempt++){
+    try {
+      setStatus('연결 중… (' + attempt + '/4)');
+      await hook(dev, attempt);
+      $('connect').disabled = true;
+      setStatus(dev.name + ' 연결됨. 이제 측정하세요.', 'on');
+      return;
+    } catch (err){
+      if (attempt === 4){
+        setStatus('연결 실패: ' + err.message + ' — 폰 블루투스를 껐다 켜고 다시 시도하세요.', 'err');
+      } else {
+        await sleep(800);
+      }
+    }
   }
 };
 
